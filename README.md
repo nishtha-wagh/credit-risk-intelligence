@@ -10,7 +10,7 @@ Credit analysts spend hours manually reconciling structured loan data (DTI ratio
 
 ## Demo
 
-![Credit Risk Decision System Demo](docs/assets/demo.gif)
+![Demo](docs/assets/credit-risk-intelligence-demo.gif)
 
 ---
 
