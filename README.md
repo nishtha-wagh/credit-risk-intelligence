@@ -8,6 +8,10 @@
 
 Credit analysts spend hours manually reconciling structured loan data (DTI ratios, FICO scores, payment history) with unstructured case notes, call transcripts, and underwriter comments. Traditional RAG systems return text summaries. This system returns **structured, auditable decisions** with confidence scores — designed to slot directly into a risk workflow.
 
+## Demo
+
+![Credit Risk Decision System Demo](docs/assets/demo.gif)
+
 ---
 
 ## Architecture
