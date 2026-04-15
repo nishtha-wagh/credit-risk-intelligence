@@ -118,10 +118,10 @@ rag-credit-risk/
 │   ├── streamlit_app.py        # 3-panel decision system UI (system-themed)
 │   ├── utils/shared.py         # Cached loaders, constants, CSS helpers
 │   └── pages/
-│       ├── 1_Live_Assessor.py       # Per-borrower AI assessment
-│       ├── 2_Retrieval_Explorer.py  # FAISS retrieval inspection
-│       ├── 3_Eval_Dashboard.py      # Evaluation metrics dashboard
-│       └── 4_Model_Explainability.py # SHAP waterfall charts
+│       ├── 1_🎯_Live_Assessor.py       # Per-borrower AI assessment
+│       ├── 2_🔎_Retrieval_Explorer.py  # FAISS retrieval inspection
+│       ├── 3_📈_Eval_Dashboard.py      # Evaluation metrics dashboard
+│       └── 4_🧩_Model_Explainability.py # SHAP waterfall charts
 │
 ├── scripts/
 │   ├── generate_mock_data.py   # Generate synthetic borrower dataset (200 records)
@@ -159,7 +159,7 @@ cp .env.example .env
 
 Open `.env` and fill in your provider of choice:
 
-Groq (recommended: free, fast, no GPU)**
+**Option A — Groq (recommended: free, fast, no GPU)**
 ```env
 LLM_PROVIDER=groq
 LLM_MODEL=llama-3.3-70b-versatile
