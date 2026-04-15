@@ -28,3 +28,4 @@ dist/
 build/
 *.egg-info/
 docs/assets/*.gif
+docs/assets/credit-risk-intelligence.gif
