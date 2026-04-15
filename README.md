@@ -23,19 +23,25 @@ Credit analysts spend hours manually reconciling structured loan data (DTI ratio
           │  ┌─────────┐  ┌──────────┐ │
           │  │Metadata │  │  Vector  │ │
           │  │ Filter  │  │ Search   │ │
-          │  │(SQL-like│  │ (FAISS)  │ │
-          │  │ filter) │  │          │ │
+          │  │         │  │ (FAISS)  │ │
           │  └────┬────┘  └────┬─────┘ │
           │       └─────┬──────┘       │
-          │         Merged &            │
-          │         Re-ranked context   │
+          │    Deduped & Re-ranked      │
+          └──────────────┬──────────────┘
+                         │
+          ┌──────────────▼──────────────┐
+          │      ML SCORING LAYER       │
+          │  XGBoost Classifier         │
+          │  + SHAP Feature Attribution │
+          │  → risk probability signal  │
           └──────────────┬──────────────┘
                          │
           ┌──────────────▼──────────────┐
           │     STRUCTURED GENERATION   │
           │  Prompt Template            │
           │  + Context Window Assembly  │
-          │  → LLM (GPT-4 / Claude)     │
+          │  → LLM (Groq / OpenAI /     │
+          │         Ollama / Anthropic) │
           └──────────────┬──────────────┘
                          │
           ┌──────────────▼──────────────┐
@@ -55,16 +61,19 @@ Credit analysts spend hours manually reconciling structured loan data (DTI ratio
 ## Key Design Decisions
 
 ### 1. Hybrid Retrieval (not plain vector search)
-Standard RAG retrieves by semantic similarity alone. This system first applies a **metadata pre-filter** (e.g. loan type, risk band, vintage year) to constrain the search space, then runs vector similarity over the filtered subset. This eliminates irrelevant context and dramatically improves precision for structured domains.
+Standard RAG retrieves by semantic similarity alone. This system first applies a **metadata pre-filter** (e.g. loan type, risk band, vintage year) to constrain the search space, then runs vector similarity over the filtered subset. Results are deduplicated by both `note_id` and text fingerprint to prevent the same note filling all top-k slots. This eliminates irrelevant and redundant context, improving precision for structured domains.
 
 ### 2. Structured Output (not free-text summaries)
 The LLM is instructed to return a strict JSON schema — `risk_tier`, `confidence`, `decision`, `key_signals`, `reasoning`. This makes outputs **auditable, parseable, and actionable** in downstream systems.
 
-### 3. Confidence Scoring
-Confidence is computed from two signals: retrieval score (how relevant was the retrieved context?) and generation consistency (does the LLM express uncertainty?). Combined into a single 0–1 float per response.
+### 3. ML Scoring Layer (XGBoost + SHAP)
+An XGBoost binary classifier runs alongside the RAG pipeline, trained on the same borrower features (FICO, DTI, payment history, deferrals, etc.). Its predicted tier and default probability are injected into the LLM context as an additional signal, and SHAP values provide per-feature attribution for explainability. The ML layer is optional and togglable from the UI.
 
-### 4. Separation of Concerns
-Each module (ingestion, retrieval, generation, evaluation) is independent and testable in isolation — designed for easy extension (swap FAISS for BigQuery Vector Search, swap OpenAI for Claude, etc.).
+### 4. Multi-Provider LLM Support
+The system routes to any of four LLM backends via a single `LLM_PROVIDER` env variable — Groq (free, fast, recommended), Ollama (fully local, no API key), OpenAI, or Anthropic. Embeddings similarly support Ollama (free, local) or OpenAI. This makes the system runnable at zero cost.
+
+### 5. Separation of Concerns
+Each module (ingestion, retrieval, generation, evaluation) is independent and testable in isolation — designed for easy extension (swap FAISS for BigQuery Vector Search, swap Groq for Claude, etc.).
 
 ---
 
@@ -73,59 +82,55 @@ Each module (ingestion, retrieval, generation, evaluation) is independent and te
 ```
 rag-credit-risk/
 ├── data/
-│   ├── raw/                   # Source CSVs (borrower records, notes)
-│   ├── processed/             # Chunked, cleaned text for embedding
-│   └── schemas/               # BigQuery-compatible SQL schemas
+│   ├── raw/                    # Source CSVs (borrowers.csv, case_notes.csv)
+│   ├── processed/              # FAISS index, metadata JSON, XGBoost model
+│   └── schemas/                # BigQuery-compatible SQL schemas
 │
 ├── ingestion/
-│   ├── __init__.py
-│   ├── loader.py              # Load + validate raw borrower data
-│   ├── chunker.py             # Text chunking strategies
-│   └── embedder.py            # Embed text → vectors, store in FAISS
+│   ├── loader.py               # Load + validate raw borrower data
+│   ├── chunker.py              # Text chunking strategies
+│   └── embedder.py             # Embed text → vectors, store in FAISS
+│                               # Supports: Ollama (free) or OpenAI
 │
 ├── retrieval/
-│   ├── __init__.py
-│   ├── vector_store.py        # FAISS index wrapper (load/query)
-│   ├── metadata_filter.py     # Structured pre-filtering logic
-│   └── hybrid_retriever.py    # Combines metadata filter + vector search
+│   └── hybrid_retriever.py     # Metadata pre-filter + FAISS vector search
+│                               # Deduplication by note_id + text fingerprint
 │
 ├── generation/
-│   ├── __init__.py
-│   ├── context_builder.py     # Assemble retrieved docs into context window
-│   ├── generator.py           # LLM call + structured output parsing
-│   └── confidence.py          # Confidence score computation
+│   ├── context_builder.py      # Assemble retrieved docs into context window
+│   ├── generator.py            # LLM routing + structured output parsing
+│                               # Supports: Groq, Ollama, OpenAI, Anthropic
+│   ├── xgb_scorer.py           # XGBoost classifier (train + score)
+│   └── shap_explainer.py       # SHAP feature attribution
 │
 ├── prompts/
-│   ├── system_prompt.txt      # System-level LLM instructions
-│   ├── decision_template.txt  # Decision generation prompt template
-│   └── evaluation_prompt.txt  # Eval scoring prompt
+│   ├── system_prompt.txt       # System-level LLM instructions
+│   └── decision_template.txt   # Decision generation prompt template
 │
 ├── evaluation/
-│   ├── __init__.py
-│   ├── metrics.py             # Faithfulness, relevance, completeness
-│   └── run_eval.py            # Batch evaluation runner
+│   ├── metrics.py              # Faithfulness, relevance, completeness (LLM-judged)
+│   └── run_eval.py             # Batch evaluation runner with MLflow support
 │
 ├── api/
-│   ├── __init__.py
-│   ├── main.py                # FastAPI app entry point
-│   ├── routes.py              # /assess, /batch, /health endpoints
-│   └── schemas.py             # Pydantic request/response models
+│   └── main.py                 # FastAPI app (/assess, /batch, /health)
 │
 ├── app/
-│   └── streamlit_app.py       # Interactive Streamlit demo
+│   ├── streamlit_app.py        # 3-panel decision system UI (system-themed)
+│   ├── utils/shared.py         # Cached loaders, constants, CSS helpers
+│   └── pages/
+│       ├── 1_Live_Assessor.py       # Per-borrower AI assessment
+│       ├── 2_Retrieval_Explorer.py  # FAISS retrieval inspection
+│       ├── 3_Eval_Dashboard.py      # Evaluation metrics dashboard
+│       └── 4_Model_Explainability.py # SHAP waterfall charts
+│
+├── scripts/
+│   ├── generate_mock_data.py   # Generate synthetic borrower dataset (200 records)
+│   ├── build_index.py          # Chunk + embed + build FAISS index
+│   └── train_xgb.py            # Train + save XGBoost model
 │
 ├── tests/
 │   ├── test_retrieval.py
-│   ├── test_generation.py
-│   └── test_api.py
-│
-├── docs/
-│   ├── architecture.md        # Detailed design decisions
-│   └── evaluation_results.md  # Benchmark results summary
-│
-├── scripts/
-│   ├── generate_mock_data.py  # Generate synthetic borrower dataset
-│   └── build_index.py         # One-time: chunk + embed + build FAISS index
+│   └── test_generation.py
 │
 ├── .env.example
 ├── requirements.txt
@@ -143,7 +148,6 @@ rag-credit-risk/
 ```bash
 git clone https://github.com/yourusername/rag-credit-risk.git
 cd rag-credit-risk
-python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -151,30 +155,79 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Add your OPENAI_API_KEY (or ANTHROPIC_API_KEY)
 ```
 
-### 3. Generate mock data & build index
+Open `.env` and fill in your provider of choice:
+
+Groq (recommended: free, fast, no GPU)**
+```env
+LLM_PROVIDER=groq
+LLM_MODEL=llama-3.3-70b-versatile
+OPENAI_API_KEY=gsk_your_groq_key_here     # get from console.groq.com
+OPENAI_BASE_URL=https://api.groq.com/openai/v1
+
+EMBEDDING_PROVIDER=ollama
+EMBEDDING_MODEL=nomic-embed-text
+OLLAMA_BASE_URL=http://localhost:11434
+```
+
+**Option B — Fully local (no API key, needs Ollama)**
+```env
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3.1:8b
+EMBEDDING_PROVIDER=ollama
+EMBEDDING_MODEL=nomic-embed-text
+```
+
+**Option C — OpenAI**
+```env
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o
+OPENAI_API_KEY=sk-your-key-here
+EMBEDDING_PROVIDER=openai
+EMBEDDING_MODEL=text-embedding-3-small
+```
+
+### 3. Start Ollama (if using Ollama embeddings)
 
 ```bash
-python scripts/generate_mock_data.py   # Creates data/raw/borrowers.csv
-python scripts/build_index.py          # Embeds + stores in data/processed/
+ollama serve                      # keep running in a background terminal
+ollama pull nomic-embed-text      # one-time download (~274MB)
 ```
 
-### 4. Run the API
+### 4. Generate data, build index, train model
+
+```bash
+# Export env vars first (macOS/Linux)
+export $(grep -v '^#' .env | grep -v '^$' | xargs)
+
+python scripts/generate_mock_data.py   # → data/raw/borrowers.csv + case_notes.csv
+python scripts/build_index.py          # → data/processed/index.faiss + metadata.json
+python scripts/train_xgb.py            # → data/processed/xgb_model.json
+```
+
+### 5. Run the Streamlit app
+
+```bash
+export $(grep -v '^#' .env | grep -v '^$' | xargs) && streamlit run app/streamlit_app.py
+```
+
+### 6. Run batch evaluation
+
+```bash
+export $(grep -v '^#' .env | grep -v '^$' | xargs) && python -m evaluation.run_eval --n 20
+# With XGBoost signal:
+python -m evaluation.run_eval --xgb --n 20
+```
+
+### 7. Run the API
 
 ```bash
 uvicorn api.main:app --reload
 # → http://localhost:8000/docs
 ```
 
-### 5. Run the Streamlit demo
-
-```bash
-streamlit run app/streamlit_app.py
-```
-
-### 6. Docker (full stack)
+### 8. Docker (full stack)
 
 ```bash
 docker-compose up --build
@@ -199,11 +252,31 @@ docker-compose up --build
     "DTI ratio: 0.54 (above 0.45 threshold)",
     "No prior default — mitigating factor"
   ],
-  "reasoning": "Structured data indicates elevated DTI and payment irregularity. Retrieved case notes (similarity: 0.91) confirm underwriter flagged employment instability at origination. Risk tier set to HIGH based on policy rule R-114.",
-  "retrieval_score": 0.91,
-  "sources_used": 3
+  "reasoning": "Structured data indicates elevated DTI and payment irregularity. Retrieved case notes (similarity: 0.66) confirm underwriter flagged employment instability at origination. Risk tier set to HIGH based on policy rule R-114.",
+  "retrieval_score": 0.66,
+  "sources_used": 5,
+  "xgb_predicted_tier": "HIGH",
+  "xgb_probability": 0.81
 }
 ```
+
+---
+
+## Evaluation Results
+
+Evaluated on 20-record holdout set using LLM-as-judge scoring (Groq llama-3.3-70b-versatile).
+
+| Metric | Score |
+|---|---|
+| Faithfulness | 0.50 |
+| Relevance | 0.80 |
+| Completeness | 0.92 |
+| Decision accuracy (vs. analyst labels) | 0.40 |
+| Composite score | 0.685 |
+| Avg confidence | 0.91 |
+| Avg latency (single assessment) | ~1.5s |
+
+> Note: Decision accuracy of 0.40 reflects LLM vs. analyst label agreement on a synthetic dataset with 86% HIGH/CRITICAL class imbalance — not a calibrated benchmark. Faithfulness and completeness are the more meaningful metrics for this system.
 
 ---
 
@@ -217,63 +290,39 @@ docker-compose up --build
 
 ---
 
-## Evaluation Results
-
-| Metric | Score |
-|---|---|
-| Faithfulness | 0.91 |
-| Relevance | 0.88 |
-| Decision accuracy (vs. analyst labels) | 0.83 |
-| Avg. latency (single assessment) | 1.4s |
-
-*Evaluated on 100-record holdout set. Analyst labels generated from mock dataset ground truth.*
-
----
-
-## Limitations
-
-- Mock dataset is synthetic — production deployment requires real borrower data governance
-- Confidence scoring is heuristic; not calibrated against actuarial benchmarks
-- FAISS index held in memory — swap to BigQuery Vector Search or Pinecone for scale
-- LLM outputs require human-in-the-loop review before operational use
-
----
-
-## Extensions
-
-- [ ] Swap FAISS → BigQuery Vector Search for GCP-native deployment
-- [ ] Add XGBoost score as structured signal alongside RAG output
-- [ ] SHAP values on structured features for explainability layer
-- [ ] Fine-tune embedding model on credit domain vocabulary
-- [ ] Add MLflow experiment tracking for retrieval + generation metrics
-
----
-
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
-| Embedding | OpenAI `text-embedding-3-small` |
-| Vector store | FAISS (local) |
-| LLM | GPT-4o / Claude 3.5 Sonnet |
+| Embeddings | Ollama `nomic-embed-text` (free, local) or OpenAI `text-embedding-3-small` |
+| Vector store | FAISS (in-memory, local) |
+| LLM | Groq `llama-3.3-70b-versatile` (default) · Ollama · OpenAI · Anthropic |
+| ML scoring | XGBoost classifier + SHAP explainer |
 | API | FastAPI |
-| UI | Streamlit |
+| UI | Streamlit (3-panel decision system, system-themed dark/light) |
+| Evaluation | LLM-as-judge (faithfulness, relevance, completeness) |
 | Data | BigQuery-compatible CSV schema |
 | Containerisation | Docker + Docker Compose |
 | Testing | pytest |
 
 ---
 
-## Resume Bullets
+## Limitations
 
-> Copy these once the project is complete:
-
-- Built decision-aware RAG system combining structured credit signals (DTI, FICO, payment history) with unstructured case notes, generating structured JSON risk assessments with confidence scoring
-- Implemented hybrid retrieval (metadata pre-filter + FAISS vector search) improving retrieval precision over naive semantic search for credit risk domain
-- Designed structured prompt architecture producing auditable, decision-ready outputs — not free-text summaries — exposed via FastAPI and interactive Streamlit demo
+- Mock dataset is synthetic — production deployment requires real borrower data governance
+- `export $(grep -v '^#' .env | grep -v '^$' | xargs)` must be re-run each terminal session (or add `load_dotenv()` to scripts)
+- FAISS index held in memory — swap to BigQuery Vector Search or Pinecone for scale
+- XGBoost trained on mock data; accuracy metrics are illustrative, not production-calibrated
+- LLM outputs require human-in-the-loop review before operational use
 
 ---
 
-## Interview Story
+## Extensions
 
-> "I built a RAG system for credit risk assessment. The key insight was that standard RAG returns summaries — not decisions. I changed the output schema to structured JSON with a risk tier, confidence score, and explicit reasoning chain. I also implemented hybrid retrieval: instead of searching all documents by similarity, I first filter by loan metadata, then run vector search over the filtered subset. That gave me much better precision. The system can process a borrower ID and return a structured recommendation in under 2 seconds."
+- [x] XGBoost score as structured signal alongside RAG output
+- [x] SHAP values on structured features for explainability layer
+- [x] MLflow experiment tracking for retrieval + generation metrics
+- [ ] Swap FAISS → BigQuery Vector Search for GCP-native deployment
+- [ ] Fine-tune embedding model on credit domain vocabulary
+- [ ] Calibrate confidence scoring against actuarial benchmarks
+- [ ] Add streaming LLM responses for lower perceived latency
