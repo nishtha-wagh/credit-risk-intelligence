@@ -1,0 +1,5 @@
+Assess the credit risk for borrower {{BORROWER_ID}}.
+
+{{CONTEXT}}
+
+Produce a structured risk assessment following the output schema exactly.
